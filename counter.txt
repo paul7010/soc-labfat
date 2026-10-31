@@ -1,0 +1,273 @@
+`timescale 1ns / 1ps
+//////////////////////////////////////////////////////////////////////////////////
+// Company: 
+// Engineer: 
+// 
+// Create Date: 05.09.2026 11:10:05
+// Design Name: 
+// Module Name: my_counter1
+// Project Name: 
+// Target Devices: 
+// Tool Versions: 
+// Description: 
+// 
+// Dependencies: 
+// 
+// Revision:
+// Revision 0.01 - File Created
+// Additional Comments:
+// 
+//////////////////////////////////////////////////////////////////////////////////
+
+
+module my_counter1 (
+    input        clk,
+    input        rst,
+    input        en,
+    input        clear,
+    input  [7:0] max_val,
+    output [7:0] count
+);
+
+    reg [7:0] count_reg;
+
+    always @(posedge clk) begin
+        if (rst || clear) begin
+            count_reg <= 8'd0;
+        end
+        else if (en) begin
+            if (count_reg >= max_val)
+                count_reg <= 8'd0;
+            else
+                count_reg <= count_reg + 8'd1;
+        end
+    end
+
+    assign count = count_reg;
+
+endmodule
+
+TB
+
+`timescale 1ns / 1ps
+//////////////////////////////////////////////////////////////////////////////////
+// Company: 
+// Engineer: 
+// 
+// Create Date: 05.09.2026 11:11:21
+// Design Name: 
+// Module Name: testbench
+// Project Name: 
+// Target Devices: 
+// Tool Versions: 
+// Description: 
+// 
+// Dependencies: 
+// 
+// Revision:
+// Revision 0.01 - File Created
+// Additional Comments:
+// 
+//////////////////////////////////////////////////////////////////////////////////
+
+
+`timescale 1ns/1ps
+
+module testbench;
+
+    reg         clk;
+    reg         rst;
+    reg         sel;
+    reg         wen;
+    reg  [19:0] addr;
+    reg  [31:0] wr_data;
+    wire [31:0] rd_data;
+
+    counters uut (
+        .clk     (clk),
+        .rst     (rst),
+        .sel     (sel),
+        .wen     (wen),
+        .addr    (addr),
+        .wr_data (wr_data),
+        .rd_data (rd_data)
+    );
+
+    parameter ADDR_REG1 = 20'd0,
+              ADDR_REG2 = 20'd4,
+              ADDR_REG3 = 20'd8,
+              ADDR_REG4 = 20'd12;
+
+    // 10 ns clock period
+    always #5 clk = ~clk;
+
+    // -------------------------------
+    // Write task
+    // -------------------------------
+    task write_reg;
+        input [19:0] address;
+        input [31:0] data;
+
+        begin
+            @(negedge clk);
+
+            sel     = 1'b1;
+            wen     = 1'b1;
+            addr    = address;
+            wr_data = data;
+
+            @(negedge clk);
+
+            sel     = 1'b0;
+            wen     = 1'b0;
+            addr    = 20'd0;
+            wr_data = 32'd0;
+        end
+    endtask
+
+    // -------------------------------
+    // Read task
+    // -------------------------------
+    task read_reg;
+        input  [19:0] address;
+        output [31:0] data;
+
+        begin
+            @(negedge clk);
+
+            sel     = 1'b1;
+            wen     = 1'b0;
+            addr    = address;
+            wr_data = 32'd0;
+
+            @(posedge clk);
+            #1;
+
+            data = rd_data;
+
+            @(negedge clk);
+
+            sel  = 1'b0;
+            wen  = 1'b0;
+            addr = 20'd0;
+        end
+    endtask
+
+    reg [31:0] read_value;
+
+    // -------------------------------
+    // Test sequence
+    // -------------------------------
+    initial begin
+
+        clk     = 1'b0;
+        rst     = 1'b1;
+        sel     = 1'b0;
+        wen     = 1'b0;
+        addr    = 20'd0;
+        wr_data = 32'd0;
+
+        $display("======================================");
+        $display("Starting Counter Testbench");
+        $display("======================================");
+
+        // Reset
+        #20;
+        rst = 1'b0;
+
+        // --------------------------------
+        // TEST 1: Set maximum count = 5
+        // --------------------------------
+        $display("\nTEST 1: Setting max value to 5");
+
+        write_reg(ADDR_REG2, 32'd5);
+
+        read_reg(ADDR_REG2, read_value);
+
+        if (read_value == 32'd5)
+            $display("PASS: REG2 = %d", read_value);
+        else
+            $display("FAIL: REG2 = %d", read_value);
+
+        // --------------------------------
+        // TEST 2: Enable counter
+        // --------------------------------
+        $display("\nTEST 2: Enabling counter");
+
+        write_reg(ADDR_REG1, 32'd1);
+
+        read_reg(ADDR_REG1, read_value);
+
+        if (read_value == 32'd1)
+            $display("PASS: REG1 = %d", read_value);
+        else
+            $display("FAIL: REG1 = %d", read_value);
+
+        // --------------------------------
+        // TEST 3: Observe counter
+        // --------------------------------
+        $display("\nTEST 3: Counter sequence");
+
+        repeat (8) begin
+            read_reg(ADDR_REG3, read_value);
+            $display("Counter = %d", read_value[7:0]);
+        end
+
+        // --------------------------------
+        // TEST 4: Clear counter
+        // --------------------------------
+        $display("\nTEST 4: Clearing counter");
+
+        write_reg(ADDR_REG1, 32'd2);
+
+        read_reg(ADDR_REG3, read_value);
+
+        if (read_value == 32'd0)
+            $display("PASS: Counter cleared");
+        else
+            $display("FAIL: Counter = %d", read_value);
+
+        // --------------------------------
+        // TEST 5: Disable counter
+        // --------------------------------
+        $display("\nTEST 5: Disabling counter");
+
+        write_reg(ADDR_REG1, 32'd0);
+
+        read_reg(ADDR_REG3, read_value);
+        $display("Counter after disable = %d", read_value[7:0]);
+
+        // --------------------------------
+        // TEST 6: Scratchpad register
+        // --------------------------------
+        $display("\nTEST 6: Scratchpad register");
+
+        write_reg(ADDR_REG4, 32'd99);
+
+        read_reg(ADDR_REG4, read_value);
+
+        if (read_value == 32'd99)
+            $display("PASS: REG4 = %d", read_value);
+        else
+            $display("FAIL: REG4 = %d", read_value);
+
+        // --------------------------------
+        // End simulation
+        // --------------------------------
+        #20;
+
+        $display("\n======================================");
+        $display("Testbench Completed");
+        $display("======================================");
+
+        $finish;
+
+    end
+
+endmodule
+      sel     = 0;
+      addr    = 0;
+      #40;
+      $finish;
+  end
+endmodule

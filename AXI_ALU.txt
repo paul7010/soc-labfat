@@ -1,0 +1,415 @@
+
+`timescale 1ns/1ps
+
+module alu_core (
+    input  wire [31:0] a,
+    input  wire [31:0] b,
+    input  wire [1:0]  op,
+    output reg  [31:0] result
+);
+    always @(*) begin
+        case (op)
+            2'b00: result = a + b;
+            2'b01: result = a - b;
+            2'b10: result = a & b;
+            2'b11: result = a | b;
+            default: result = 32'b0;
+        endcase
+    end
+endmodule
+
+
+module axi_alu_top (
+    input  wire        aclk,
+    input  wire        aresetn,
+
+    // Write Address Channel
+    input  wire [31:0] awaddr,
+    input  wire        awvalid,
+    output wire        awready,
+
+    // Write Data Channel
+    input  wire [31:0] wdata,
+    input  wire        wvalid,
+    output wire        wready,
+
+    // Write Response Channel
+    output reg  [1:0]  bresp,
+    output reg         bvalid,
+    input  wire        bready,
+
+    // Read Address Channel
+    input  wire [31:0] araddr,
+    input  wire        arvalid,
+    output wire        arready,
+
+    // Read Data Channel
+    output reg  [31:0] rdata,
+    output reg  [1:0]  rresp,
+    output reg         rvalid,
+    input  wire        rready
+);
+
+    reg [31:0] reg_a, reg_b;
+    reg [1:0]  reg_op;
+    wire [31:0] alu_result;
+
+    // Independently buffered write channels
+    reg [31:0] saved_awaddr, saved_wdata;
+    reg aw_pending, w_pending;
+
+    assign awready = !aw_pending && !bvalid;
+    assign wready  = !w_pending  && !bvalid;
+    assign arready = !rvalid;
+
+    alu_core u_alu (
+        .a      (reg_a),
+        .b      (reg_b),
+        .op     (reg_op),
+        .result (alu_result)
+    );
+
+    // AXI-like write interface
+    always @(posedge aclk or negedge aresetn) begin
+        if (!aresetn) begin
+            reg_a       <= 32'b0;
+            reg_b       <= 32'b0;
+            reg_op      <= 2'b0;
+            saved_awaddr <= 32'b0;
+            saved_wdata  <= 32'b0;
+            aw_pending  <= 1'b0;
+            w_pending   <= 1'b0;
+            bvalid      <= 1'b0;
+            bresp       <= 2'b00;
+        end else begin
+
+            // Capture address independently
+            if (awvalid && awready) begin
+                saved_awaddr <= awaddr;
+                aw_pending   <= 1'b1;
+            end
+
+            // Capture write data independently
+            if (wvalid && wready) begin
+                saved_wdata <= wdata;
+                w_pending   <= 1'b1;
+            end
+
+            // Execute write once both channels have been captured.
+            // Nonblocking assignments mean this uses previously
+            // captured address/data on the following clock edge.
+            if (aw_pending && w_pending && !bvalid) begin
+                case (saved_awaddr[3:0])
+                    4'h0: reg_a  <= saved_wdata;
+                    4'h4: reg_b  <= saved_wdata;
+                    4'h8: reg_op <= saved_wdata[1:0];
+                    default: ;
+                endcase
+
+                aw_pending <= 1'b0;
+                w_pending  <= 1'b0;
+                bvalid     <= 1'b1;
+                bresp      <= (saved_awaddr[3:0] == 4'h0 ||
+                               saved_awaddr[3:0] == 4'h4 ||
+                               saved_awaddr[3:0] == 4'h8)
+                              ? 2'b00 : 2'b10;
+            end
+
+            // Hold response until accepted
+            if (bvalid && bready)
+                bvalid <= 1'b0;
+        end
+    end
+
+    // Read interface
+    always @(posedge aclk or negedge aresetn) begin
+        if (!aresetn) begin
+            rdata  <= 32'b0;
+            rresp  <= 2'b00;
+            rvalid <= 1'b0;
+        end else begin
+            // Hold read data stable while RVALID=1 and RREADY=0
+            if (arvalid && arready) begin
+                case (araddr[3:0])
+                    4'h0: rdata <= reg_a;
+                    4'h4: rdata <= reg_b;
+                    4'h8: rdata <= {30'b0, reg_op};
+                    4'hC: rdata <= alu_result;
+                    default: rdata <= 32'hDEAD_BEEF;
+                endcase
+
+                rresp  <= (araddr[3:0] == 4'h0 ||
+                           araddr[3:0] == 4'h4 ||
+                           araddr[3:0] == 4'h8 ||
+                           araddr[3:0] == 4'hC)
+                          ? 2'b00 : 2'b10;
+                rvalid <= 1'b1;
+            end else if (rvalid && rready) begin
+                rvalid <= 1'b0;
+            end
+        end
+    end
+
+endmodule
+
+
+TB
+
+
+`timescale 1ns/1ps
+
+module tb_axi_alu;
+
+    reg aclk;
+    reg aresetn;
+
+    reg  [31:0] awaddr;
+    reg  [31:0] wdata;
+    reg  [31:0] araddr;
+
+    reg awvalid;
+    reg wvalid;
+    reg bready;
+
+    reg arvalid;
+    reg rready;
+
+    wire awready;
+    wire wready;
+    wire bvalid;
+
+    wire arready;
+    wire rvalid;
+
+    wire [1:0] bresp;
+    wire [1:0] rresp;
+    wire [31:0] rdata;
+
+    reg [31:0] read_val;
+
+    // Instantiate the DUT
+    axi_alu_top uut (
+        .aclk(aclk),
+        .aresetn(aresetn),
+
+        .awaddr(awaddr),
+        .awvalid(awvalid),
+        .awready(awready),
+
+        .wdata(wdata),
+        .wvalid(wvalid),
+        .wready(wready),
+
+        .bresp(bresp),
+        .bvalid(bvalid),
+        .bready(bready),
+
+        .araddr(araddr),
+        .arvalid(arvalid),
+        .arready(arready),
+
+        .rdata(rdata),
+        .rresp(rresp),
+        .rvalid(rvalid),
+        .rready(rready)
+    );
+
+    // 100 MHz clock
+    initial begin
+        aclk = 1'b0;
+    end
+
+    always #5 aclk = ~aclk;
+
+    // AXI-like write transaction
+    task axi_write;
+        input [31:0] addr;
+        input [31:0] data;
+
+        integer addr_done;
+        integer data_done;
+
+        begin
+            addr_done = 0;
+            data_done = 0;
+
+            @(negedge aclk);
+
+            awaddr  = addr;
+            wdata   = data;
+            awvalid = 1'b1;
+            wvalid  = 1'b1;
+            bready  = 1'b0;
+
+            // Independently handshake address and data
+            while ((addr_done == 0) || (data_done == 0)) begin
+                @(posedge aclk);
+
+                if (awvalid && awready)
+                    addr_done = 1;
+
+                if (wvalid && wready)
+                    data_done = 1;
+
+                @(negedge aclk);
+
+                if (addr_done == 1)
+                    awvalid = 1'b0;
+
+                if (data_done == 1)
+                    wvalid = 1'b0;
+            end
+
+            // Wait for the write response
+            bready = 1'b1;
+
+            while (bvalid !== 1'b1)
+                @(negedge aclk);
+
+            if (bresp !== 2'b00) begin
+                $display(
+                    "WRITE ERROR: addr=%h BRESP=%b",
+                    addr, bresp
+                );
+            end
+
+            @(negedge aclk);
+            bready = 1'b0;
+
+        end
+    endtask
+
+    // AXI-like read transaction
+    task axi_read;
+        input [31:0] addr;
+        output [31:0] data;
+
+        begin
+            @(negedge aclk);
+
+            araddr  = addr;
+            arvalid = 1'b1;
+            rready  = 1'b0;
+
+            // Wait for address acceptance
+            while (arready !== 1'b1)
+                @(negedge aclk);
+
+            @(negedge aclk);
+            arvalid = 1'b0;
+
+            // Wait for read response
+            while (rvalid !== 1'b1)
+                @(negedge aclk);
+
+            data = rdata;
+
+            if (rresp !== 2'b00) begin
+                $display(
+                    "READ ERROR: addr=%h RRESP=%b",
+                    addr, rresp
+                );
+            end
+
+            rready = 1'b1;
+
+            @(negedge aclk);
+            rready = 1'b0;
+
+        end
+    endtask
+
+    // Compare actual and expected results
+    task check_result;
+        input [255:0] test_name;
+        input [31:0] actual;
+        input [31:0] expected;
+
+        begin
+            if (actual === expected) begin
+                $display(
+                    "PASS: %0s = %0d (0x%08h)",
+                    test_name, actual, actual
+                );
+            end
+            else begin
+                $display(
+                    "FAIL: %0s actual=%0d (0x%08h), expected=%0d (0x%08h)",
+                    test_name, actual, actual, expected, expected
+                );
+            end
+        end
+    endtask
+
+    // Main test sequence
+    initial begin
+
+        // Initialize signals
+        aresetn = 1'b0;
+
+        awaddr  = 32'b0;
+        wdata   = 32'b0;
+        araddr  = 32'b0;
+
+        awvalid = 1'b0;
+        wvalid  = 1'b0;
+        bready  = 1'b0;
+
+        arvalid = 1'b0;
+        rready  = 1'b0;
+
+        // Apply reset
+        repeat (3) @(negedge aclk);
+        aresetn = 1'b1;
+
+        $display("");
+        $display("====================================");
+        $display(" AXI-LIKE ALU TEST STARTED");
+        $display("====================================");
+
+        // Load operands A = 25, B = 10
+        axi_write(32'h00000000, 32'd25);
+        axi_write(32'h00000004, 32'd10);
+
+        // ADD: 25 + 10 = 35
+        axi_write(32'h00000008, 32'd0);
+        axi_read(32'h0000000C, read_val);
+        check_result("ADD: 25 + 10", read_val, 32'd35);
+
+        // SUB: 25 - 10 = 15
+        axi_write(32'h00000008, 32'd1);
+        axi_read(32'h0000000C, read_val);
+        check_result("SUB: 25 - 10", read_val, 32'd15);
+
+        // AND: 25 & 10 = 8
+        axi_write(32'h00000008, 32'd2);
+        axi_read(32'h0000000C, read_val);
+        check_result("AND: 25 & 10", read_val, (32'd25 & 32'd10));
+
+        // OR: 25 | 10 = 27
+        axi_write(32'h00000008, 32'd3);
+        axi_read(32'h0000000C, read_val);
+        check_result("OR: 25 | 10", read_val, (32'd25 | 32'd10));
+
+        $display("====================================");
+        $display(" AXI-LIKE ALU TEST COMPLETED");
+        $display("====================================");
+
+        repeat (3) @(negedge aclk);
+        $finish;
+
+    end
+
+    // Generate waveform file
+    initial begin
+        $dumpfile("dump.vcd");
+        $dumpvars(0, tb_axi_alu);
+    end
+
+    // Simulation timeout
+    initial begin
+        #10000;
+        $fatal(1, "TIMEOUT: possible handshake deadlock");
+    end
+
+endmodule

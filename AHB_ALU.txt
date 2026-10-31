@@ -1,0 +1,501 @@
+
+`timescale 1ns/1ps
+
+module alu_4bit (
+    input  wire [3:0] A,
+    input  wire [3:0] B,
+    input  wire [1:0] OP,
+    output reg  [3:0] RESULT
+);
+
+    always @(*) begin
+        case (OP)
+            2'b00: RESULT = A + B;  
+            2'b01: RESULT = A - B;  
+            2'b10: RESULT = A & B;  
+            2'b11: RESULT = A | B;  
+            default: RESULT = 4'b0000;
+        endcase
+    end
+
+endmodule
+
+// AHB-LITE SLAVE WRAPPER FOR 4-BIT ALU with Single-transfer, zero-wait-state 
+
+
+module ahb_alu_slave (
+
+    input  wire        HCLK,
+    input  wire        HRESETn,
+
+    // AHB-Lite address/control phase
+    input  wire        HSEL,
+    input  wire [31:0] HADDR,
+    input  wire [1:0]  HTRANS,
+    input  wire        HWRITE,
+    input  wire [2:0]  HSIZE,
+    input  wire        HREADY,
+
+    // AHB-Lite write-data phase
+    input  wire [31:0] HWDATA,
+
+    // AHB-Lite response/read-data signals
+    output reg  [31:0] HRDATA,
+    output wire        HREADYOUT,
+    output wire        HRESP
+);
+
+    // Register address map
+
+    localparam ADDR_A      = 32'h0000_0000;
+    localparam ADDR_B      = 32'h0000_0004;
+    localparam ADDR_OP     = 32'h0000_0008;
+    localparam ADDR_RESULT = 32'h0000_000C;
+
+    // Register storage
+
+    reg [3:0] operand_A;
+    reg [3:0] operand_B;
+    reg [1:0] operation;
+
+    wire [3:0] alu_result;
+
+    // ALU instantiation
+
+    alu_4bit U_ALU (
+        .A      (operand_A),
+        .B      (operand_B),
+        .OP     (operation),
+        .RESULT (alu_result)
+    );
+
+    // Address phase registers. These hold the transfer information for the following data phase.
+
+    reg [31:0] addr_reg;
+    reg        write_reg;
+    reg        transfer_reg;
+
+    wire valid_address;
+
+    assign valid_address =
+           (addr_reg == ADDR_A)      ||
+           (addr_reg == ADDR_B)      ||
+           (addr_reg == ADDR_OP)     ||
+           (addr_reg == ADDR_RESULT);
+
+    // Zero-wait-state response.
+    // HRESP remains OKAY in this basic implementation.
+
+    assign HREADYOUT = 1'b1;
+    assign HRESP     = 1'b0;
+
+    // Capture address/control during the address phase.
+    // HTRANS[1] = 1 for NONSEQ and SEQ transfers.
+
+    always @(posedge HCLK or negedge HRESETn) begin
+
+        if (!HRESETn) begin
+            addr_reg     <= 32'h0;
+            write_reg    <= 1'b0;
+            transfer_reg <= 1'b0;
+        end
+        else if (HREADY) begin
+
+            transfer_reg <= HSEL && HTRANS[1];
+
+            if (HSEL && HTRANS[1]) begin
+                addr_reg  <= HADDR;
+                write_reg <= HWRITE;
+            end
+
+        end
+    end
+
+    // Write registers during the data phase.
+    // HWDATA corresponds to the previously captured address.
+
+    always @(posedge HCLK or negedge HRESETn) begin
+
+        if (!HRESETn) begin
+            operand_A <= 4'b0000;
+            operand_B <= 4'b0000;
+            operation <= 2'b00;
+        end
+        else if (HREADY && transfer_reg &&
+                 write_reg && valid_address) begin
+
+            case (addr_reg)
+
+                ADDR_A:
+                    operand_A <= HWDATA[3:0];
+
+                ADDR_B:
+                    operand_B <= HWDATA[3:0];
+
+                ADDR_OP:
+                    operation <= HWDATA[1:0];
+
+                ADDR_RESULT: begin
+                    // RESULT is read-only.
+                end
+
+                default: begin
+                    // No operation.
+                end
+
+            endcase
+        end
+    end
+
+    // Read data phase.
+    // HRDATA corresponds to the captured address.
+
+    always @(*) begin
+
+        HRDATA = 32'h0000_0000;
+
+        if (transfer_reg && !write_reg && valid_address) begin
+
+            case (addr_reg)
+
+                ADDR_A:
+                    HRDATA = {28'b0, operand_A};
+
+                ADDR_B:
+                    HRDATA = {28'b0, operand_B};
+
+                ADDR_OP:
+                    HRDATA = {30'b0, operation};
+
+                ADDR_RESULT:
+                    HRDATA = {28'b0, alu_result};
+
+                default:
+                    HRDATA = 32'h0000_0000;
+
+            endcase
+        end
+    end
+
+    // HSIZE is included for interface compatibility.
+
+endmodule
+
+
+TESTBENCH
+
+
+`timescale 1ns/1ps
+
+module tb_ahb_alu_slave;
+
+    // AHB-Lite signals
+
+    reg         HCLK;
+    reg         HRESETn;
+
+    reg         HSEL;
+    reg  [31:0] HADDR;
+    reg  [1:0]  HTRANS;
+    reg         HWRITE;
+    reg  [2:0]  HSIZE;
+    reg         HREADY;
+    reg  [31:0] HWDATA;
+
+    wire [31:0] HRDATA;
+    wire        HREADYOUT;
+    wire        HRESP;
+
+    // Address map
+
+    localparam ADDR_A      = 32'h0000_0000;
+    localparam ADDR_B      = 32'h0000_0004;
+    localparam ADDR_OP     = 32'h0000_0008;
+    localparam ADDR_RESULT = 32'h0000_000C;
+
+    // ALU operation codes
+
+    localparam OP_ADD = 2'b00;
+    localparam OP_SUB = 2'b01;
+    localparam OP_AND = 2'b10;
+    localparam OP_OR  = 2'b11;
+
+    integer pass_count;
+    integer fail_count;
+
+    reg [31:0] read_value;
+
+    // DUT instantiation
+
+    ahb_alu_slave DUT (
+        .HCLK      (HCLK),
+        .HRESETn   (HRESETn),
+        .HSEL      (HSEL),
+        .HADDR     (HADDR),
+        .HTRANS    (HTRANS),
+        .HWRITE    (HWRITE),
+        .HSIZE     (HSIZE),
+        .HREADY    (HREADY),
+        .HWDATA    (HWDATA),
+        .HRDATA    (HRDATA),
+        .HREADYOUT (HREADYOUT),
+        .HRESP     (HRESP)
+    );
+
+
+    initial begin
+        HCLK = 1'b0;
+        forever #5 HCLK = ~HCLK;
+    end
+
+
+    initial begin
+        $dumpfile("ahb_alu_waveform.vcd");
+        $dumpvars(0, tb_ahb_alu_slave);
+    end
+
+    // Reset task
+
+    task reset_dut;
+    begin
+        HRESETn = 1'b0;
+
+        HSEL    = 1'b0;
+        HADDR   = 32'h0;
+        HTRANS  = 2'b00;
+        HWRITE  = 1'b0;
+        HSIZE   = 3'b010;
+        HREADY  = 1'b1;
+        HWDATA  = 32'h0;
+
+        repeat (2) @(negedge HCLK);
+
+        HRESETn = 1'b1;
+
+        @(negedge HCLK);
+      
+        $display("AHB-Lite RESET COMPLETED");
+     
+    end
+    endtask
+
+    // AHB-Lite write task
+    // Address phase followed by data phase
+
+    task ahb_write;
+        input [31:0] address;
+        input [31:0] data;
+    begin
+        // ADDRESS PHASE
+
+        @(negedge HCLK);
+
+        HSEL   = 1'b1;
+        HADDR  = address;
+        HWRITE = 1'b1;
+        HTRANS = 2'b10;       // NONSEQ
+        HSIZE  = 3'b010;      // 32-bit word
+
+        @(posedge HCLK);
+
+        // DATA PHASE
+
+        @(negedge HCLK);
+
+        HWDATA = data;
+
+        // No new address transfer
+
+        HSEL   = 1'b0;
+        HTRANS = 2'b00;
+        HWRITE = 1'b0;
+        HADDR  = 32'h0;
+
+        @(posedge HCLK);
+
+        if (HREADYOUT && !HRESP) begin
+            $display("AHB WRITE: ADDR=%h DATA=%h",
+                     address, data);
+        end
+        else begin
+            $display("WRITE RESPONSE ERROR at %h", address);
+            fail_count = fail_count + 1;
+        end
+
+        @(negedge HCLK);
+
+        HWDATA = 32'h0;
+    end
+    endtask
+
+    // AHB-Lite read task
+
+    task ahb_read;
+        input  [31:0] address;
+        output [31:0] data;
+    begin
+        // ADDRESS PHASE
+
+        @(negedge HCLK);
+
+        HSEL   = 1'b1;
+        HADDR  = address;
+        HWRITE = 1'b0;
+        HTRANS = 2'b10;       // NONSEQ
+        HSIZE  = 3'b010;      // 32-bit word
+
+        @(posedge HCLK);
+
+        // DATA PHASE
+
+        @(negedge HCLK);
+
+        // HRDATA is valid for the captured address.
+        // Allow combinational logic to settle.
+
+        #1;
+        data = HRDATA;
+
+        if (HREADYOUT && !HRESP) begin
+            $display("AHB READ : ADDR=%h DATA=%h",
+                     address, data);
+        end
+        else begin
+            $display("READ RESPONSE ERROR at %h", address);
+            fail_count = fail_count + 1;
+        end
+
+        // End current transfer
+
+        HSEL   = 1'b0;
+        HTRANS = 2'b00;
+        HADDR  = 32'h0;
+
+        @(posedge HCLK);
+        @(negedge HCLK);
+    end
+    endtask
+
+    // ALU verification task
+
+    task test_alu;
+        input [3:0] A;
+        input [3:0] B;
+        input [1:0] OP;
+        input [3:0] expected;
+
+        reg [31:0] result;
+    begin
+        $display("ALU TEST: A=%d B=%d OP=%b", A, B, OP);
+
+        // Write operands and operation
+
+        ahb_write(ADDR_A, {28'b0, A});
+        ahb_write(ADDR_B, {28'b0, B});
+        ahb_write(ADDR_OP, {30'b0, OP});
+
+        // Read ALU result
+
+        ahb_read(ADDR_RESULT, result);
+
+        // Check expected result
+
+        if (result[3:0] === expected) begin
+            $display("PASS: Expected=%h Received=%h",
+                     expected, result[3:0]);
+            pass_count = pass_count + 1;
+        end
+        else begin
+            $display("FAIL: Expected=%h Received=%h",
+                     expected, result[3:0]);
+            fail_count = fail_count + 1;
+        end
+    end
+    endtask
+
+    // Main test sequence
+
+    initial begin
+
+        pass_count = 0;
+        fail_count = 0;
+
+        reset_dut;
+
+        // TEST 1: ADD
+
+        test_alu(4'd5, 4'd3, OP_ADD, 4'd8);
+
+        // TEST 2: SUB
+ 
+        test_alu(4'd9, 4'd4, OP_SUB, 4'd5);
+
+        // TEST 3: AND
+
+        test_alu(4'b1010, 4'b1100, OP_AND, 4'b1000);
+
+        // TEST 4: OR
+
+        test_alu(4'b1010, 4'b0101, OP_OR, 4'b1111);
+
+        // TEST 5: REGISTER READ-BACK
+
+        $display("");
+        $display("REGISTER READ-BACK TEST");
+
+        ahb_write(ADDR_A, 32'd7);
+        ahb_read(ADDR_A, read_value);
+
+        if (read_value[3:0] === 4'd7) begin
+            $display("PASS: Operand A read-back");
+            pass_count = pass_count + 1;
+        end
+        else begin
+            $display("FAIL: Operand A read-back");
+            fail_count = fail_count + 1;
+        end
+
+        // TEST 6: INVALID ADDRESS READ
+        // The supplied RTL returns zero and HRESP=OKAY.
+
+        $display("");
+        $display("INVALID ADDRESS READ TEST");
+
+        ahb_read(32'h0000_0020, read_value);
+
+        if (read_value === 32'h0000_0000) begin
+            $display("PASS: Invalid read returns zero");
+            pass_count = pass_count + 1;
+        end
+        else begin
+            $display("FAIL: Invalid read data");
+            fail_count = fail_count + 1;
+        end
+
+        // TEST 7: INVALID ADDRESS WRITE
+        // Invalid writes are ignored by the supplied RTL.
+
+        $display("");
+        $display("INVALID ADDRESS WRITE TEST");
+
+        ahb_write(32'h0000_0020, 32'h0000_00AA);
+        ahb_read(ADDR_A, read_value);
+
+        if (read_value[3:0] === 4'd7) begin
+            $display("PASS: Invalid write did not change A");
+            pass_count = pass_count + 1;
+        end
+        else begin
+            $display("FAIL: Invalid write affected A");
+            fail_count = fail_count + 1;
+        end
+
+        $display("AHB-LITE ALU TEST SUMMARY");
+        $display("PASSED = %0d", pass_count);
+        $display("FAILED = %0d", fail_count);
+      
+        #10;
+        $finish;
+    end
+
+endmodule
